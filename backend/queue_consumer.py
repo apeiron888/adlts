@@ -141,23 +141,20 @@ class QueueConsumer(threading.Thread):
         gracefully degrades when future-phase components are not yet plugged in.
         """
 
-        # ── Phase 1: Save frame to disk ───────────────────────────────────────
-        # Always active in Phase 1 (save_debug=True).
-        # Produces: debug_frames/<timestamp_ms>.jpg
-        # What to check:
-        #   • Files appear at ~100 ms intervals (10 fps sampling)
-        #   • Timestamps are monotonically increasing
-        #   • Images look correct (not garbled, right resolution)
-        if self.save_debug:
-            self._debug_save(tsf)
-
-        # ── Phase 2 stub: Lane detection ──────────────────────────────────────
+        # ── Phase 2: Lane detection ──────────────────────────────────────────
         lane_result = None
         if self.lane_detector:
             try:
                 lane_result = self.lane_detector.detect(tsf.frame)
             except Exception as exc:
                 logger.error("LaneDetector error: %s", exc)
+
+        # ── Phase 1+2: Save frame to disk ────────────────────────────────────
+        # In Phase 2, we save the lane overlay if available; else save raw frame.
+        # This lets us visually confirm the lane detection is working.
+        if self.save_debug:
+            frame_to_save = lane_result.raw_frame if lane_result else tsf.frame
+            self._debug_save(frame_to_save, tsf.timestamp_ms)
 
         # ── Phase 3 stub: Sign detection ──────────────────────────────────────
         sign_result = None
@@ -208,20 +205,20 @@ class QueueConsumer(threading.Thread):
 
     # ── Debug save ────────────────────────────────────────────────────────────
 
-    def _debug_save(self, tsf: TimestampedFrame):
+    def _debug_save(self, frame: np.ndarray, timestamp_ms: float):
         """
-        Save the popped frame as a JPEG with a timestamp/queue-depth overlay.
+        Save a frame as JPEG with metadata overlay.
+
+        In Phase 1, this was the raw frame.
+        In Phase 2+, this is typically the overlay frame (with lane lines, etc.).
 
         Filename: debug_frames/<timestamp_ms>.jpg
-        Overlay (top-left): "ts=<ms>  q=<depth>"  in green text.
-
-        This is the Phase 1 proof that the queue pipeline is running correctly.
+        Overlay (top-left): "ts=<ms>  q=<depth>  proc=<count>"  in green text.
         """
         try:
-            # Draw informational overlay so you can see metadata at a glance
-            annotated = tsf.frame.copy()
+            annotated = frame.copy()
             label = (
-                f"ts={tsf.timestamp_ms:.0f}ms  "
+                f"ts={timestamp_ms:.0f}ms  "
                 f"q={self.frame_queue.size()}  "
                 f"proc={self.frames_processed}"
             )
@@ -237,7 +234,7 @@ class QueueConsumer(threading.Thread):
             )
 
             filename = os.path.join(
-                DEBUG_FRAMES_DIR, f"{tsf.timestamp_ms:.0f}.jpg"
+                DEBUG_FRAMES_DIR, f"{timestamp_ms:.0f}.jpg"
             )
             ok = cv2.imwrite(filename, annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if not ok:

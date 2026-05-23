@@ -37,7 +37,7 @@ MINIO_SECURE    = False    # set True with TLS in production
 
 # ─── ESP32 stream ─────────────────────────────────────────────────────────────
 
-ESP32_STREAM_URL = os.getenv("ESP32_STREAM_URL", "http://192.168.1.xxx/stream")
+ESP32_STREAM_URL = os.getenv("ESP32_STREAM_URL", "http://192.168.1.2/stream")
 
 # ─── Debug output ─────────────────────────────────────────────────────────────
 
