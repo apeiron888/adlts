@@ -146,6 +146,7 @@ async def health():
         "status": "ok",
         "receiver_running": _stream_receiver is not None and _stream_receiver.is_alive(),
         "consumer_running": _queue_consumer is not None and _queue_consumer.is_alive(),
+        "receiver_paused": _stream_receiver is not None and _stream_receiver.is_paused if _stream_receiver is not None else False,
         "lane_detector_ready": _lane_detector is not None,
     }
 
@@ -201,6 +202,7 @@ async def stats():
             "frames_received": _stream_receiver.frames_received,
             "frames_to_queue": _stream_receiver.frames_to_queue,
             "minio_errors": _stream_receiver.minio_errors,
+            "paused": _stream_receiver.is_paused if _stream_receiver is not None else False,
         },
         "queue": {
             "depth": _frame_queue.size(),
@@ -210,6 +212,24 @@ async def stats():
             "frames_processed": _queue_consumer.frames_processed,
         },
     }
+
+
+@app.post("/stream/stop")
+async def stream_stop():
+    """Pause the StreamReceiver (stop pushing new frames to the processing queue)."""
+    if not _stream_receiver:
+        return {"error": "StreamReceiver not initialized"}
+    _stream_receiver.pause()
+    return {"message": "StreamReceiver paused", "paused": _stream_receiver.is_paused}
+
+
+@app.post("/stream/start")
+async def stream_start():
+    """Resume the StreamReceiver (allow pushing sampled frames again)."""
+    if not _stream_receiver:
+        return {"error": "StreamReceiver not initialized"}
+    _stream_receiver.resume()
+    return {"message": "StreamReceiver resumed", "paused": _stream_receiver.is_paused}
 
 
 def _generate_mjpeg():

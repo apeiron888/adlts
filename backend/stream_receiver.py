@@ -62,6 +62,8 @@ class StreamReceiver(threading.Thread):
         self._latest: np.ndarray | None = None
 
         self._stop_event   = threading.Event()
+        # When set, the receiver is paused (no new frames are pushed to queue)
+        self._paused_event = threading.Event()
         self._frame_index  = 0
         # e.g. CAMERA_FPS=30, QUEUE_SAMPLE_FPS=10 → sample every 3rd frame
         self._sample_every = max(1, CAMERA_FPS // QUEUE_SAMPLE_FPS)
@@ -82,6 +84,18 @@ class StreamReceiver(threading.Thread):
     def stop(self):
         """Signal the thread to exit after the current frame."""
         self._stop_event.set()
+
+    def pause(self):
+        """Pause sampling and pushing frames to the processing queue."""
+        self._paused_event.set()
+
+    def resume(self):
+        """Resume sampling and pushing frames to the processing queue."""
+        self._paused_event.clear()
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused_event.is_set()
 
     # ── Thread body ───────────────────────────────────────────────────────────
 
@@ -117,7 +131,8 @@ class StreamReceiver(threading.Thread):
                 self._record_to_minio(frame, ts_ms)
 
             # ── Sample at QUEUE_SAMPLE_FPS → push to processing queue ─────────
-            if self._frame_index % self._sample_every == 0:
+            # If paused, skip pushing sampled frames (but continue updating latest_frame)
+            if not self._paused_event.is_set() and (self._frame_index % self._sample_every == 0):
                 tsf = TimestampedFrame(
                     frame=frame.copy(),   # copy so Thread B owns this memory
                     timestamp_ms=ts_ms,
