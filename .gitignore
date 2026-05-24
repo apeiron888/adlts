@@ -2,3 +2,5 @@
 __pycache__
 *.pyc
 debug_frames
+yolov8n.pt
+./models/yolov8n.pt
