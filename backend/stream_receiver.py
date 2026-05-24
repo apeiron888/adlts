@@ -111,12 +111,34 @@ class StreamReceiver(threading.Thread):
             logger.error("Could not open stream; StreamReceiver exiting.")
             return
 
+        consecutive_failures = 0
         while not self._stop_event.is_set():
             ret, frame = cap.read()
             if not ret or frame is None:
-                logger.warning("Frame read failed — retrying in 50 ms")
-                time.sleep(0.05)
+                consecutive_failures += 1
+                if consecutive_failures == 1:
+                    logger.warning(
+                        "Frame read failed (ret=%s, frame=%s) — retrying...",
+                        ret,
+                        "None" if frame is None else f"shape={frame.shape}",
+                    )
+                if consecutive_failures >= 20:
+                    logger.error(
+                        "20+ consecutive frame read failures — stream may be disconnected. "
+                        "Attempting to reconnect..."
+                    )
+                    cap.release()
+                    time.sleep(1.0)
+                    cap = self._open_capture()
+                    if cap is None:
+                        logger.error("Reconnection failed; exiting.")
+                        return
+                    consecutive_failures = 0
+                else:
+                    time.sleep(0.05)
                 continue
+            
+            consecutive_failures = 0
 
             ts_ms = time.monotonic_ns() / 1_000_000
             self._frame_index += 1
@@ -158,15 +180,31 @@ class StreamReceiver(threading.Thread):
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _open_capture(self) -> cv2.VideoCapture | None:
-        """Opens the MJPEG stream with a 5 s connection timeout."""
+        """Opens the MJPEG stream with explicit codec flags for compatibility."""
         cap = cv2.VideoCapture(self.stream_url)
-        # Give OpenCV up to 5 000 ms to connect
+        
+        # Set timeouts
         cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5_000)
         cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5_000)
+        
+        # Force MJPEG codec (0x47504A4D = 'MJPG' in fourcc)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        
+        # Set buffer size (prevent frame drops)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+        
         if not cap.isOpened():
             logger.error("cv2.VideoCapture could not open: %s", self.stream_url)
             return None
-        logger.info("Stream opened successfully.")
+        
+        # Log actual stream properties
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        logger.info(
+            "Stream opened successfully — resolution=%dx%d @ %.1f fps",
+            width, height, fps,
+        )
         return cap
 
     def _record_to_minio(self, frame: np.ndarray, ts_ms: float):

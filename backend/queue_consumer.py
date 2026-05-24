@@ -9,7 +9,9 @@ Phase 1  (ACTIVE):
 
 Phase 2+ (STUB — wired but inactive until the component is passed in):
   • LaneDetector.detect()     → LaneResult
-  • SignDetector.detect()     → SignResult
+    • QRDetector.detect()       → ManeuverResult
+    • TrafficLightDetector.detect() → TrafficLightResult
+    • MotionDetector.detect()   → MotionResult
   • ScoringEngine.score_frame()→ FrameScore
   • TestController.update()
   • Dashboard.emit_update()
@@ -19,7 +21,7 @@ constructor.  No other change needed.  Same pattern for each later phase.
 
 OMITTED (future phases):
   - Result persistence to MinIO / database
-  - Overlay rendering pipeline (done in LaneDetector / SignDetector)
+    - Overlay rendering pipeline (done in LaneDetector / QR/TrafficLight detectors)
   - WebSocket push of per-frame results (Phase 6)
 """
 
@@ -49,7 +51,9 @@ class QueueConsumer(threading.Thread):
     ----------
     frame_queue     : FrameQueue — shared with StreamReceiver (Thread A).
     lane_detector   : LaneDetector instance, or None (Phase 2).
-    sign_detector   : SignDetector instance, or None (Phase 3).
+    qr_detector     : QRDetector instance, or None (Phase 3).
+    traffic_light_detector : TrafficLightDetector instance, or None (Phase 3).
+    motion_detector : MotionDetector instance, or None (Phase 3).
     scoring_engine  : ScoringEngine instance, or None (Phase 4).
     test_controller : TestController instance, or None (Phase 5).
     dashboard       : Dashboard / Socket.IO emitter, or None (Phase 6).
@@ -61,7 +65,9 @@ class QueueConsumer(threading.Thread):
         self,
         frame_queue,
         lane_detector=None,
-        sign_detector=None,
+        qr_detector=None,
+        traffic_light_detector=None,
+        motion_detector=None,
         scoring_engine=None,
         test_controller=None,
         dashboard=None,
@@ -70,7 +76,9 @@ class QueueConsumer(threading.Thread):
         super().__init__(daemon=True, name="QueueConsumer")
         self.frame_queue     = frame_queue
         self.lane_detector   = lane_detector    # None → Phase 2 not active
-        self.sign_detector   = sign_detector    # None → Phase 3 not active
+        self.qr_detector     = qr_detector      # None → Phase 3 not active
+        self.traffic_light_detector = traffic_light_detector  # None → Phase 3 not active
+        self.motion_detector = motion_detector  # None → Phase 3 not active
         self.scoring_engine  = scoring_engine   # None → Phase 4 not active
         self.test_controller = test_controller  # None → Phase 5 not active
         self.dashboard       = dashboard        # None → Phase 6 not active
@@ -156,13 +164,69 @@ class QueueConsumer(threading.Thread):
             frame_to_save = lane_result.raw_frame if lane_result else tsf.frame
             self._debug_save(frame_to_save, tsf.timestamp_ms)
 
-        # ── Phase 3 stub: Sign detection ──────────────────────────────────────
-        sign_result = None
-        if self.sign_detector:
+        # ── Phase 3: QR maneuver detection ───────────────────────────────────
+        maneuver_result = None
+        if self.qr_detector:
             try:
-                sign_result = self.sign_detector.detect(tsf.frame)
+                maneuver_result = self.qr_detector.detect(tsf.frame)
+                if maneuver_result is not None and maneuver_result.maneuver_name is not None:
+                    logger.info(
+                        "QR detected: maneuver=%s payload=%s bbox=%s",
+                        maneuver_result.maneuver_name,
+                        maneuver_result.payload,
+                        maneuver_result.bbox,
+                    )
             except Exception as exc:
-                logger.error("SignDetector error: %s", exc)
+                logger.error("QRDetector error: %s", exc)
+
+        # ── Phase 3: Traffic-light detection ─────────────────────────────────
+        traffic_light_result = None
+        if self.traffic_light_detector:
+            try:
+                traffic_light_result = self.traffic_light_detector.detect(tsf.frame)
+                if traffic_light_result is not None:
+                    logger.info(
+                        "Traffic light detected: state=%s confidence=%.3f bbox=%s",
+                        traffic_light_result.state,
+                        traffic_light_result.confidence,
+                        traffic_light_result.bbox,
+                    )
+            except Exception as exc:
+                logger.error("TrafficLightDetector error: %s", exc)
+
+        # ── Phase 3: Motion detection ────────────────────────────────────────
+        motion_result = None
+        if self.motion_detector:
+            try:
+                motion_result = self.motion_detector.detect(tsf.frame)
+                if motion_result is not None:
+                    logger.info(
+                        "Motion detected: moving=%s ratio=%.4f changed=%d/%d roi=%s",
+                        motion_result.is_moving,
+                        motion_result.pixel_change_ratio,
+                        motion_result.changed_pixels,
+                        motion_result.total_pixels,
+                        motion_result.roi,
+                    )
+            except Exception as exc:
+                logger.error("MotionDetector error: %s", exc)
+
+        # ── Phase 3: Traffic-light + motion rule logging ────────────────────
+        if traffic_light_result is not None and motion_result is not None:
+            try:
+                tl_state = getattr(traffic_light_result.state, "value", str(traffic_light_result.state))
+                if tl_state == "red" and motion_result.is_moving:
+                    logger.warning(
+                        "Traffic rule check: RED + moving (ratio=%.4f)",
+                        motion_result.pixel_change_ratio,
+                    )
+                elif tl_state == "green" and motion_result.is_moving:
+                    logger.info(
+                        "Traffic rule check: GREEN + moving (ratio=%.4f)",
+                        motion_result.pixel_change_ratio,
+                    )
+            except Exception as exc:
+                logger.error("Traffic rule check error: %s", exc)
 
         # ── Phase 4 stub: Scoring ─────────────────────────────────────────────
         frame_score = None
@@ -177,12 +241,14 @@ class QueueConsumer(threading.Thread):
                 logger.error("ScoringEngine error: %s", exc)
 
         # ── Phase 5 stub: Test controller update ──────────────────────────────
-        if self.test_controller and frame_score is not None and sign_result is not None:
+        if self.test_controller and frame_score is not None:
             try:
                 self.test_controller.update(
-                    sign_id     = sign_result.sign_id,
-                    lane_result = lane_result,
-                    frame_score = frame_score.score,
+                    maneuver_result      = maneuver_result,
+                    traffic_light_result = traffic_light_result,
+                    motion_result        = motion_result,
+                    lane_result          = lane_result,
+                    frame_score          = frame_score,
                 )
             except Exception as exc:
                 logger.error("TestController error: %s", exc)
@@ -196,9 +262,11 @@ class QueueConsumer(threading.Thread):
                     else tsf.frame
                 )
                 self.dashboard.emit_update(
-                    frame       = display_frame,
-                    frame_score = frame_score,
-                    sign_result = sign_result,
+                    frame                = display_frame,
+                    frame_score          = frame_score,
+                    maneuver_result      = maneuver_result,
+                    traffic_light_result = traffic_light_result,
+                    motion_result        = motion_result,
                 )
             except Exception as exc:
                 logger.error("Dashboard emit error: %s", exc)

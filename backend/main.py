@@ -8,12 +8,14 @@ Phase 1 (ACTIVE):
   • Graceful shutdown on interrupt
 
 Phase 2+ (STUB):
-  • Initialize lane_detector, sign_detector, scoring_engine, test_controller
+    • Initialize lane_detector, qr_detector, traffic_light_detector, motion_detector,
+        scoring_engine, test_controller
   • Pass them to QueueConsumer in the constructor
   • Phase 2: Uncomment lane_detector=lane_detector below and implement LaneDetector
 """
 
 import logging
+import os
 import signal
 import sys
 import time
@@ -32,11 +34,20 @@ from config import (
     MINIO_SECURE,
     ESP32_STREAM_URL,
     LANE_WIDTH_CM,
+    TRAFFIC_LIGHT_MODEL_PATH,
 )
 from frame_queue import FrameQueue
 from stream_receiver import StreamReceiver
 from queue_consumer import QueueConsumer
 from lane_detector import LaneDetector
+from qr_detector import QRDetector
+from traffic_light_detector import TrafficLightDetector
+from motion_detector import MotionDetector
+from mock_detectors import (
+    MockQRDetector,
+    MockTrafficLightDetector,
+    MockMotionDetector,
+)
 
 # ─── Logging setup ───────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -54,6 +65,9 @@ _stream_receiver: StreamReceiver | None = None
 _queue_consumer: QueueConsumer | None = None
 _minio_client: Minio | None = None
 _lane_detector: LaneDetector | None = None
+_qr_detector = None
+_traffic_light_detector = None
+_motion_detector = None
 
 # ─── Startup & shutdown ──────────────────────────────────────────────────────
 
@@ -61,7 +75,8 @@ _lane_detector: LaneDetector | None = None
 @app.on_event("startup")
 async def startup_event():
     """Initialize threads and services."""
-    global _frame_queue, _stream_receiver, _queue_consumer, _minio_client, _lane_detector
+    global _frame_queue, _stream_receiver, _queue_consumer, _minio_client
+    global _lane_detector, _qr_detector, _traffic_light_detector, _motion_detector
 
     logger.info("=" * 70)
     logger.info("Backend startup sequence starting...")
@@ -102,12 +117,30 @@ async def startup_event():
     _lane_detector = LaneDetector()
     logger.info("LaneDetector initialized")
 
+    # Initialize Phase 3 detectors
+    use_mock = os.getenv("USE_MOCK", "1").strip().lower() in {"1", "true", "yes", "on"}
+    if use_mock:
+        _qr_detector = MockQRDetector()
+        _traffic_light_detector = MockTrafficLightDetector()
+        _motion_detector = MockMotionDetector()
+        logger.info("Phase 3 detectors running in MOCK mode (USE_MOCK=1)")
+    else:
+        _qr_detector = QRDetector(cooldown_s=3.0)
+        _traffic_light_detector = TrafficLightDetector(model_path=TRAFFIC_LIGHT_MODEL_PATH)
+        _motion_detector = MotionDetector(movement_threshold_ratio=0.01)
+        logger.info(
+            "Phase 3 detectors running in REAL mode (USE_MOCK=0, model=%s)",
+            TRAFFIC_LIGHT_MODEL_PATH,
+        )
+
     # Start QueueConsumer (Thread B)
     # Phase 2: lane_detector now active
     _queue_consumer = QueueConsumer(
         frame_queue=_frame_queue,
         lane_detector=_lane_detector,  # Phase 2 — now active
-        # sign_detector=None,  # Phase 3 later
+        qr_detector=_qr_detector,
+        traffic_light_detector=_traffic_light_detector,
+        motion_detector=_motion_detector,
         # scoring_engine=None,  # Phase 4 later
         # test_controller=None,  # Phase 5 later
         # dashboard=None,  # Phase 6 later

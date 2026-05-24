@@ -6,13 +6,15 @@ ALL phases import from here.  No phase defines its own structures.
 Phase 1  uses: TimestampedFrame, CAMERA_FPS, QUEUE_SAMPLE_FPS, QUEUE_MAX_SIZE,
                IMAGE_WIDTH, IMAGE_HEIGHT, MINIO_*, ESP32_STREAM_URL
 Phase 2+ uses: LaneResult, LaneDetector params
-Phase 3+ uses: SignResult, MANEUVER_SEQUENCE
+Phase 3+ uses: ManeuverResult, TrafficLightResult, MotionResult,
+               TrafficLightState, MANEUVER_SEQUENCE
 Phase 4+ uses: FrameScore, LANE_WIDTH_CM
 """
 
 import os
 from dataclasses import dataclass, field
 from typing import Optional
+from enum import Enum
 import numpy as np
 
 # ─── Stream / queue tuning ────────────────────────────────────────────────────
@@ -38,6 +40,15 @@ MINIO_SECURE    = False    # set True with TLS in production
 # ─── ESP32 stream ─────────────────────────────────────────────────────────────
 
 ESP32_STREAM_URL = os.getenv("ESP32_STREAM_URL", "http://192.168.1.xxx/stream")
+
+# ─── Model paths (offline-friendly) ─────────────────────────────────────────
+
+# Absolute path to avoid cwd issues
+_MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models")
+TRAFFIC_LIGHT_MODEL_PATH = os.getenv(
+    "TRAFFIC_LIGHT_MODEL_PATH",
+    os.path.join(_MODEL_DIR, "yolov8n.pt")
+)
 
 # ─── Debug output ─────────────────────────────────────────────────────────────
 
@@ -85,15 +96,44 @@ class LaneResult:
     raw_frame:  np.ndarray        # original frame with optional debug overlay drawn on it
 
 
+class TrafficLightState(str, Enum):
+    """Traffic light classification state for the current frame."""
+    RED = "red"
+    GREEN = "green"
+    NONE = "none"
+
+
 @dataclass
-class SignResult:
+class ManeuverResult:
     """
-    Output of SignDetector.detect().
-    Phase 3 fills this; Phase 1–2 QueueConsumer has a stub that passes None.
+    Output of QRDetector.detect().
     """
-    sign_id:    Optional[int]   # index into MANEUVER_SEQUENCE, -1 = stop sign, None = no sign
+    maneuver_name: Optional[str]   # e.g. "straight_1", or None when not found
+    confidence: float              # QR detector has no score → 1.0 on valid decode
+    payload: Optional[str]         # raw decoded payload, e.g. "maneuver:straight_1"
+    bbox: Optional[tuple]          # (x1, y1, x2, y2) or None
+
+
+@dataclass
+class TrafficLightResult:
+    """
+    Output of TrafficLightDetector.detect().
+    """
+    state: TrafficLightState
     confidence: float
-    bbox:       Optional[tuple] # (x1, y1, x2, y2) or None
+    bbox: Optional[tuple]          # (x1, y1, x2, y2) or None
+
+
+@dataclass
+class MotionResult:
+    """
+    Output of MotionDetector.detect().
+    """
+    is_moving: bool
+    pixel_change_ratio: float
+    changed_pixels: int
+    total_pixels: int
+    roi: Optional[tuple] = None    # (x1, y1, x2, y2) or None
 
 
 @dataclass
