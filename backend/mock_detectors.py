@@ -42,49 +42,67 @@ class MockQRDetector:
 
 
 class MockTrafficLightDetector:
-    """Cycles traffic light states every N frames."""
+    """
+    Simulates a realistic traffic light cycle.
 
-    def __init__(self, every_n_frames: int = 45):
-        self.every_n_frames = every_n_frames
-        self._count = 0
-        self._states = cycle([
-            TrafficLightState.RED,
-            TrafficLightState.NONE,
-            TrafficLightState.GREEN,
-            TrafficLightState.NONE,
-        ])
-        self._current = TrafficLightState.NONE
+    Cycle (frames): GREEN×60 → NONE×5 → RED×30 → NONE×5 → repeat
+    The car is expected to stop during RED.  MockMotionDetector is coordinated
+    with this so that RED+moving never fires by default.
+    """
+
+    CYCLE = [
+        (TrafficLightState.GREEN, 60),
+        (TrafficLightState.NONE,   5),
+        (TrafficLightState.RED,   30),
+        (TrafficLightState.NONE,   5),
+    ]
+
+    def __init__(self):
+        self._frame = 0
+        self._flat = []
+        for state, n in self.CYCLE:
+            self._flat.extend([state] * n)
 
     def detect(self, frame):
-        self._count += 1
-        if self._count % self.every_n_frames == 0:
-            self._current = next(self._states)
-
+        state = self._flat[self._frame % len(self._flat)]
+        self._frame += 1
         return TrafficLightResult(
-            state=self._current,
-            confidence=0.9 if self._current != TrafficLightState.NONE else 0.0,
-            bbox=(200, 20, 240, 100) if self._current != TrafficLightState.NONE else None,
+            state=state,
+            confidence=0.9 if state != TrafficLightState.NONE else 0.0,
+            bbox=(200, 20, 240, 100) if state != TrafficLightState.NONE else None,
         )
 
 
 class MockMotionDetector:
-    """Alternates motion state every N frames."""
+    """
+    Mirrors MockTrafficLightDetector: car moves during GREEN, stops during RED.
 
-    def __init__(self, every_n_frames: int = 30):
-        self.every_n_frames = every_n_frames
-        self._count = 0
-        self._moving = False
+    Same frame indices as MockTrafficLightDetector so is_moving is always False
+    when state==RED → no traffic violations fire in normal mock operation.
+    """
+
+    CYCLE = [
+        (True,  60),   # GREEN phase — moving
+        (False,  5),   # transition
+        (False, 30),   # RED phase — stopped
+        (False,  5),   # transition
+    ]
+
+    def __init__(self):
+        self._frame = 0
+        self._flat = []
+        for moving, n in self.CYCLE:
+            self._flat.extend([moving] * n)
 
     def detect(self, frame):
-        self._count += 1
-        if self._count % self.every_n_frames == 0:
-            self._moving = not self._moving
-
-        ratio = 0.03 if self._moving else 0.002
+        moving = self._flat[self._frame % len(self._flat)]
+        self._frame += 1
+        ratio = 0.03 if moving else 0.002
         return MotionResult(
-            is_moving=self._moving,
+            is_moving=moving,
             pixel_change_ratio=ratio,
             changed_pixels=int(1000 * ratio),
             total_pixels=1000,
             roi=(0, 120, 320, 240),
         )
+

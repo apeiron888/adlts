@@ -39,7 +39,7 @@ MINIO_SECURE    = False    # set True with TLS in production
 
 # ─── ESP32 stream ─────────────────────────────────────────────────────────────
 
-ESP32_STREAM_URL = os.getenv("ESP32_STREAM_URL", "http://192.168.1.xxx/stream")
+ESP32_STREAM_URL = os.getenv("ESP32_STREAM_URL", "http://192.168.1.10/stream")
 
 # ─── Model paths (offline-friendly) ─────────────────────────────────────────
 
@@ -145,3 +145,17 @@ class FrameScore:
     score:    float   # 0–100
     error_cm: float   # lateral deviation in real-world cm
     error_px: float   # lateral deviation in pixels
+
+
+@dataclass
+class ManeuverScore:
+    """
+    Final score for one completed maneuver segment.
+    Produced by ScoringEngine.aggregate_maneuver(); collected by Phase 5 TestController.
+    """
+    name:        str    # e.g. "straight_1"
+    raw_score:   float  # trimmed mean of frame scores before penalties, 0–100
+    penalty:     float  # total points deducted (traffic violations, etc.)
+    final_score: float  # max(0, raw_score - penalty)
+    frame_count: int    # number of frames scored during this maneuver
+    violations:  int    # number of confirmed RED-light running violations

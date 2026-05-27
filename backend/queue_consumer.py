@@ -12,9 +12,11 @@ Phase 2+ (STUB — wired but inactive until the component is passed in):
     • QRDetector.detect()       → ManeuverResult
     • TrafficLightDetector.detect() → TrafficLightResult
     • MotionDetector.detect()   → MotionResult
-  • ScoringEngine.score_frame()→ FrameScore
-  • TestController.update()
-  • Dashboard.emit_update()
+  • ScoringEngine.score_frame()         → FrameScore        (Phase 4 ACTIVE)
+  • ScoringEngine.record_traffic_event() → violation tracking (Phase 4 ACTIVE)
+  • ScoringEngine.add_frame_score()      → maneuver buffer   (Phase 4 ACTIVE)
+  • TestController.update()              → stub (Phase 5)
+  • Dashboard.emit_update()              → stub (Phase 6)
 
 To activate Phase 2, simply pass lane_detector=LaneDetector() to the
 constructor.  No other change needed.  Same pattern for each later phase.
@@ -157,12 +159,12 @@ class QueueConsumer(threading.Thread):
             except Exception as exc:
                 logger.error("LaneDetector error: %s", exc)
 
-        # ── Phase 1+2: Save frame to disk ────────────────────────────────────
+        # ── Phase 1+2+4: Save frame to disk ──────────────────────────────────
         # In Phase 2, we save the lane overlay if available; else save raw frame.
         # This lets us visually confirm the lane detection is working.
         if self.save_debug:
             frame_to_save = lane_result.raw_frame if lane_result else tsf.frame
-            self._debug_save(frame_to_save, tsf.timestamp_ms)
+            self._debug_save(frame_to_save, tsf.timestamp_ms, getattr(self, "_latest_score", None))
 
         # ── Phase 3: QR maneuver detection ───────────────────────────────────
         maneuver_result = None
@@ -228,15 +230,29 @@ class QueueConsumer(threading.Thread):
             except Exception as exc:
                 logger.error("Traffic rule check error: %s", exc)
 
-        # ── Phase 4 stub: Scoring ─────────────────────────────────────────────
+        # ── Phase 4: Scoring ──────────────────────────────────────────────────
+        # score_frame() → pure lateral math, returns None if not calibrated.
+        # record_traffic_event() → tracks RED+moving streak, fires penalty at threshold.
+        # add_frame_score() → appends to maneuver buffer for later aggregation.
         frame_score = None
         if self.scoring_engine and lane_result:
             try:
                 frame_score = self.scoring_engine.score_frame(
-                    tsf.frame,
                     lane_result.left_line,
                     lane_result.right_line,
                 )
+                self.scoring_engine.record_traffic_event(
+                    traffic_light_result, motion_result
+                )
+                if frame_score is not None:
+                    self.scoring_engine.add_frame_score(frame_score)
+                    self._latest_score = frame_score  # Cache for debug overlay
+                    
+                    # Log explicitly every ~10 frames so we don't spam too hard
+                    if self.frames_processed % 10 == 0:
+                        logger.info("ScoringEngine: Phase 4 Score: %.1f/100 (Drift: %scm)", 
+                                  frame_score.score, round(frame_score.error_cm, 1))
+
             except Exception as exc:
                 logger.error("ScoringEngine error: %s", exc)
 
@@ -273,7 +289,7 @@ class QueueConsumer(threading.Thread):
 
     # ── Debug save ────────────────────────────────────────────────────────────
 
-    def _debug_save(self, frame: np.ndarray, timestamp_ms: float):
+    def _debug_save(self, frame: np.ndarray, timestamp_ms: float, frame_score=None):
         """
         Save a frame as JPEG with metadata overlay.
 
@@ -282,6 +298,7 @@ class QueueConsumer(threading.Thread):
 
         Filename: debug_frames/<timestamp_ms>.jpg
         Overlay (top-left): "ts=<ms>  q=<depth>  proc=<count>"  in green text.
+        Overlay (row 2): Phase 4 Score.
         """
         try:
             annotated = frame.copy()
@@ -300,6 +317,20 @@ class QueueConsumer(threading.Thread):
                 1,
                 cv2.LINE_AA,
             )
+
+            # Phase 4 Visual Overlays
+            if frame_score is not None:
+                score_label = f"Score: {frame_score.score:.1f}/100  Drift: {frame_score.error_cm:.1f}cm"
+                cv2.putText(
+                    annotated,
+                    score_label,
+                    (5, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 0, 255) if frame_score.score < 50 else (255, 255, 0), # cyan/yellow or red
+                    1,
+                    cv2.LINE_AA,
+                )
 
             filename = os.path.join(
                 DEBUG_FRAMES_DIR, f"{timestamp_ms:.0f}.jpg"

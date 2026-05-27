@@ -43,6 +43,7 @@ from lane_detector import LaneDetector
 from qr_detector import QRDetector
 from traffic_light_detector import TrafficLightDetector
 from motion_detector import MotionDetector
+from scoring_engine import ScoringEngine
 from mock_detectors import (
     MockQRDetector,
     MockTrafficLightDetector,
@@ -68,6 +69,7 @@ _lane_detector: LaneDetector | None = None
 _qr_detector = None
 _traffic_light_detector = None
 _motion_detector = None
+_scoring_engine: ScoringEngine | None = None
 
 # ─── Startup & shutdown ──────────────────────────────────────────────────────
 
@@ -77,6 +79,7 @@ async def startup_event():
     """Initialize threads and services."""
     global _frame_queue, _stream_receiver, _queue_consumer, _minio_client
     global _lane_detector, _qr_detector, _traffic_light_detector, _motion_detector
+    global _scoring_engine
 
     logger.info("=" * 70)
     logger.info("Backend startup sequence starting...")
@@ -133,15 +136,18 @@ async def startup_event():
             TRAFFIC_LIGHT_MODEL_PATH,
         )
 
+    # Initialize Phase 4 scoring engine
+    _scoring_engine = ScoringEngine(lane_detector=_lane_detector)
+    logger.info("ScoringEngine initialized")
+
     # Start QueueConsumer (Thread B)
-    # Phase 2: lane_detector now active
     _queue_consumer = QueueConsumer(
         frame_queue=_frame_queue,
         lane_detector=_lane_detector,  # Phase 2 — now active
         qr_detector=_qr_detector,
         traffic_light_detector=_traffic_light_detector,
         motion_detector=_motion_detector,
-        # scoring_engine=None,  # Phase 4 later
+        scoring_engine=_scoring_engine,  # Phase 4 — now active
         # test_controller=None,  # Phase 5 later
         # dashboard=None,  # Phase 6 later
         save_debug=True,  # Enable debug frame saving
@@ -245,6 +251,72 @@ async def stats():
             "frames_processed": _queue_consumer.frames_processed,
         },
     }
+
+
+@app.get("/score")
+async def score():
+    """
+    Return the latest per-frame scoring state from the ScoringEngine.
+
+    Useful for live monitoring: poll this endpoint to see the car's current
+    lateral score, drift, violations, and how many frames have been buffered
+    for the active maneuver.
+
+    Returns 'calibrated: false' until POST /calibrate has been called.
+    """
+    if not _scoring_engine:
+        return {"error": "ScoringEngine not initialized"}
+
+    latest = getattr(_queue_consumer, "_latest_score", None) if _queue_consumer else None
+
+    return {
+        "calibrated": _scoring_engine.is_calibrated,
+        "pixels_per_cm": _scoring_engine.pixels_per_cm,
+        "latest_frame": {
+            "score": latest.score if latest else None,            # 0–100
+            "error_cm": latest.error_cm if latest else None,      # physical drift
+            "error_px": latest.error_px if latest else None,      # pixel drift
+        },
+        "active_maneuver_buffer": {
+            "frames_scored": len(_scoring_engine._frame_scores),
+            "mean_so_far": round(
+                float(sum(_scoring_engine._frame_scores) / len(_scoring_engine._frame_scores)), 2
+            ) if _scoring_engine._frame_scores else None,
+        },
+        "violations": {
+            "count": _scoring_engine._violations,
+            "penalty_pts": _scoring_engine._penalty,
+            "red_moving_streak": _scoring_engine._red_moving_streak,
+        },
+    }
+
+
+@app.post("/score/maneuver")
+async def score_maneuver(name: str = "unnamed"):
+    """
+    Finalise the current maneuver and return its aggregated ManeuverScore.
+
+    This is normally triggered automatically by a QR code in Phase 5.
+    Call it manually here to close out the current maneuver buffer and see
+    the trimmed-mean score + penalty.
+
+    Query param: ?name=straight_1   (default: 'unnamed')
+    """
+    if not _scoring_engine:
+        return {"error": "ScoringEngine not initialized"}
+    if not _scoring_engine.is_calibrated:
+        return {"error": "Not yet calibrated — call POST /calibrate first"}
+
+    ms = _scoring_engine.aggregate_maneuver(name)
+    return {
+        "maneuver": ms.name,
+        "raw_score": ms.raw_score,
+        "penalty": ms.penalty,
+        "final_score": ms.final_score,
+        "frames": ms.frame_count,
+        "violations": ms.violations,
+    }
+
 
 
 @app.post("/stream/stop")
