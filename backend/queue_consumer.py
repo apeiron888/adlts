@@ -74,6 +74,7 @@ class QueueConsumer(threading.Thread):
         test_controller=None,
         dashboard=None,
         save_debug: bool = True,
+        dashboard_emit_every_n: int = 3,
     ):
         super().__init__(daemon=True, name="QueueConsumer")
         self.frame_queue     = frame_queue
@@ -85,6 +86,7 @@ class QueueConsumer(threading.Thread):
         self.test_controller = test_controller  # None → Phase 5 not active
         self.dashboard       = dashboard        # None → Phase 6 not active
         self.save_debug      = save_debug
+        self.dashboard_emit_every_n = dashboard_emit_every_n  # Emit to dashboard every Nth frame
 
         self._stop_event = threading.Event()
 
@@ -256,21 +258,30 @@ class QueueConsumer(threading.Thread):
             except Exception as exc:
                 logger.error("ScoringEngine error: %s", exc)
 
-        # ── Phase 5 stub: Test controller update ──────────────────────────────
-        if self.test_controller and frame_score is not None:
+        # ── Phase 5: Test controller update ───────────────────────────────────
+        # Note: TestController.update() only reacts to QR detections (maneuver_result).
+        # It will process maneuver transitions even if scoring is not active.
+        if self.test_controller:
             try:
-                self.test_controller.update(
+                result = self.test_controller.update(
                     maneuver_result      = maneuver_result,
                     traffic_light_result = traffic_light_result,
                     motion_result        = motion_result,
                     lane_result          = lane_result,
                     frame_score          = frame_score,
                 )
+                if result is not None:
+                    logger.info(
+                        "TestController: run completed — candidate=%s passed=%s total=%.1f",
+                        result.candidate_id, result.passed, result.total_score
+                    )
             except Exception as exc:
                 logger.error("TestController error: %s", exc)
 
         # ── Phase 6 stub: Dashboard push ──────────────────────────────────────
-        if self.dashboard:
+        # Emit only every Nth frame to reduce bandwidth and processing overhead
+        # Default: every 3rd frame → 10fps becomes 3.3fps for dashboard (still smooth)
+        if self.dashboard and (self.frames_processed % self.dashboard_emit_every_n == 0):
             try:
                 display_frame = (
                     lane_result.raw_frame

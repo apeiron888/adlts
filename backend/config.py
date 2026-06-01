@@ -63,10 +63,8 @@ LANE_WIDTH_CM = 30.0   # Physical lane width — update after calibration run
 MANEUVER_SEQUENCE = [
     "straight_1",
     "left_curve_1",
-    "straight_2",
     "left_curve_2",
-    "straight_3",
-    "figure_8",
+    "straight_2",
     "parallel_parking",
 ]
 
@@ -159,3 +157,37 @@ class ManeuverScore:
     final_score: float  # max(0, raw_score - penalty)
     frame_count: int    # number of frames scored during this maneuver
     violations:  int    # number of confirmed RED-light running violations
+
+
+# ─── Phase 5 constants ────────────────────────────────────────────────────────
+
+PASS_THRESHOLD = float(os.getenv("PASS_THRESHOLD", "60.0"))
+
+RESULTS_DIR = os.getenv("RESULTS_DIR", "test_results")
+
+# Relative weights per maneuver used when computing the weighted mean total score.
+# Maneuvers that are harder / more safety-critical carry more weight.
+MANEUVER_WEIGHTS: dict = {
+    "straight_1":       1.0,
+    "left_curve_1":     1.5,
+    "straight_2":       1.0,
+    "left_curve_2":     1.5,
+    "straight_3":       1.0,
+    "figure_8":         2.0,
+    "parallel_parking": 2.0,
+}
+
+
+@dataclass
+class TestResult:
+    """
+    Final output of one complete driving test.
+    Produced by TestController._finish_test(); serialised to JSON by Phase 5.
+    Later passed to the Go API for storage in the candidate record.
+    """
+    candidate_id:  str
+    started_at:    float              # time.monotonic() at test start
+    finished_at:   float              # time.monotonic() at test end
+    maneuvers:     list               # List[ManeuverScore] in execution order
+    total_score:   float              # weighted mean of ManeuverScore.final_score
+    passed:        bool               # total_score >= PASS_THRESHOLD

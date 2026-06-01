@@ -79,6 +79,10 @@ class QRDetector:
         payload, points, _ = self._qr.detectAndDecode(frame)
         maneuver_name = self._parse_payload(payload)
 
+        # Log raw payload for debugging (even if invalid)
+        if payload:
+            logger.debug(f"QR raw payload: '{payload}' → parsed={maneuver_name}")
+
         if not maneuver_name:
             return ManeuverResult(
                 maneuver_name=None,

@@ -19,12 +19,14 @@ import os
 import signal
 import sys
 import time
+import asyncio
 
 import cv2
 import numpy as np
 from fastapi import FastAPI
 from starlette.responses import StreamingResponse
 from minio import Minio
+import socketio
 
 from config import (
     MINIO_ENDPOINT,
@@ -44,11 +46,8 @@ from qr_detector import QRDetector
 from traffic_light_detector import TrafficLightDetector
 from motion_detector import MotionDetector
 from scoring_engine import ScoringEngine
-from mock_detectors import (
-    MockQRDetector,
-    MockTrafficLightDetector,
-    MockMotionDetector,
-)
+from test_controller import TestController
+from dashboard import Dashboard, sio_server
 
 # ─── Logging setup ───────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -70,6 +69,8 @@ _qr_detector = None
 _traffic_light_detector = None
 _motion_detector = None
 _scoring_engine: ScoringEngine | None = None
+_test_controller: TestController | None = None
+_dashboard: Dashboard | None = None
 
 # ─── Startup & shutdown ──────────────────────────────────────────────────────
 
@@ -79,7 +80,7 @@ async def startup_event():
     """Initialize threads and services."""
     global _frame_queue, _stream_receiver, _queue_consumer, _minio_client
     global _lane_detector, _qr_detector, _traffic_light_detector, _motion_detector
-    global _scoring_engine
+    global _scoring_engine, _test_controller, _dashboard
 
     logger.info("=" * 70)
     logger.info("Backend startup sequence starting...")
@@ -120,37 +121,38 @@ async def startup_event():
     _lane_detector = LaneDetector()
     logger.info("LaneDetector initialized")
 
-    # Initialize Phase 3 detectors
-    use_mock = os.getenv("USE_MOCK", "1").strip().lower() in {"1", "true", "yes", "on"}
-    if use_mock:
-        _qr_detector = MockQRDetector()
-        _traffic_light_detector = MockTrafficLightDetector()
-        _motion_detector = MockMotionDetector()
-        logger.info("Phase 3 detectors running in MOCK mode (USE_MOCK=1)")
-    else:
-        _qr_detector = QRDetector(cooldown_s=3.0)
-        _traffic_light_detector = TrafficLightDetector(model_path=TRAFFIC_LIGHT_MODEL_PATH)
-        _motion_detector = MotionDetector(movement_threshold_ratio=0.01)
-        logger.info(
-            "Phase 3 detectors running in REAL mode (USE_MOCK=0, model=%s)",
-            TRAFFIC_LIGHT_MODEL_PATH,
-        )
+    # Initialize Phase 3 detectors (REAL mode only)
+    _qr_detector = QRDetector(cooldown_s=3.0)
+    _traffic_light_detector = TrafficLightDetector(model_path=TRAFFIC_LIGHT_MODEL_PATH)
+    _motion_detector = MotionDetector(movement_threshold_ratio=0.01)
+    logger.info(
+        "Phase 3 detectors initialized (REAL mode) — QRDetector, TrafficLightDetector, MotionDetector"
+    )
 
     # Initialize Phase 4 scoring engine
     _scoring_engine = ScoringEngine(lane_detector=_lane_detector)
     logger.info("ScoringEngine initialized")
 
+    # Initialize Phase 5 test controller
+    _test_controller = TestController(scoring_engine=_scoring_engine)
+    logger.info("TestController initialized")
+
+    # Initialize Phase 6 dashboard
+    _dashboard = Dashboard(loop=asyncio.get_running_loop())
+    logger.info("Dashboard initialized — Socket.IO ready at /socket.io")
+
     # Start QueueConsumer (Thread B)
     _queue_consumer = QueueConsumer(
         frame_queue=_frame_queue,
-        lane_detector=_lane_detector,  # Phase 2 — now active
+        lane_detector=_lane_detector,
         qr_detector=_qr_detector,
         traffic_light_detector=_traffic_light_detector,
         motion_detector=_motion_detector,
-        scoring_engine=_scoring_engine,  # Phase 4 — now active
-        # test_controller=None,  # Phase 5 later
-        # dashboard=None,  # Phase 6 later
-        save_debug=True,  # Enable debug frame saving
+        scoring_engine=_scoring_engine,   # Phase 4 — active
+        test_controller=_test_controller,  # Phase 5 — active
+        dashboard=_dashboard,              # Phase 6 — active
+        save_debug=True,
+        dashboard_emit_every_n=3,  # Emit to dashboard every 3rd frame → reduces bandwidth 3x
     )
     _queue_consumer.start()
     logger.info("QueueConsumer thread started")
@@ -319,6 +321,47 @@ async def score_maneuver(name: str = "unnamed"):
 
 
 
+@app.post("/test/start")
+async def test_start(candidate_id: str = "unknown"):
+    """
+    Start a new driving test.
+
+    The car must be calibrated first (POST /calibrate).
+    Query param: ?candidate_id=cand_001
+    """
+    if not _test_controller:
+        return {"error": "TestController not initialized"}
+    if not _scoring_engine or not _scoring_engine.is_calibrated:
+        return {"error": "Not calibrated — call POST /calibrate first"}
+    try:
+        _test_controller.start_test(candidate_id)
+        return {
+            "message": "Test started",
+            "candidate_id": candidate_id,
+            "first_maneuver": _test_controller.current_maneuver,
+        }
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+
+
+@app.get("/test/status")
+async def test_status():
+    """Return the current state of the active test."""
+    if not _test_controller:
+        return {"error": "TestController not initialized"}
+    return _test_controller.progress
+
+
+@app.post("/test/abort")
+async def test_abort():
+    """Abort the running test and reset to IDLE."""
+    if not _test_controller:
+        return {"error": "TestController not initialized"}
+    _test_controller.abort()
+    return {"message": "Test aborted", "state": _test_controller.state.value}
+
+
+
 @app.post("/stream/stop")
 async def stream_stop():
     """Pause the StreamReceiver (stop pushing new frames to the processing queue)."""
@@ -371,6 +414,22 @@ async def video_feed():
         _generate_mjpeg(),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+@app.get("/dashboard", response_class=None)
+async def dashboard_page():
+    """Serve the live dashboard HTML over HTTP (avoids file:// WebSocket restrictions)."""
+    import pathlib
+    from fastapi.responses import HTMLResponse
+    html_path = pathlib.Path(__file__).parent / "test_client.html"
+    return HTMLResponse(content=html_path.read_text(), status_code=200)
+
+
+# ─── ASGI Wrapper for Socket.IO ──────────────────────────────────────────────
+
+# Wrap the entire FastAPI application with Socket.IO so it correctly intercepts
+# /socket.io paths before passing everything else to FastAPI.
+app = socketio.ASGIApp(sio_server, other_asgi_app=app)
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────

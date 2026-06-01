@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADLTS Live Dashboard</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #58a6ff;
+      margin-bottom: 1.5rem;
+    }
+
+    #video-container {
+      position: relative;
+      border: 2px solid #30363d;
+      border-radius: 8px;
+      overflow: hidden;
+      max-width: 480px;
+      width: 100%;
+    }
+
+    #video-feed {
+      width: 100%;
+      display: block;
+      background: #161b22;
+      min-height: 240px;
+    }
+
+    #overlay {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .badge {
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+
+    .badge.score {
+      background: rgba(31, 111, 235, 0.85);
+    }
+
+    .badge.maneuver {
+      background: rgba(56, 139, 253, 0.75);
+    }
+
+    .badge.traffic-red {
+      background: rgba(240, 71, 71, 0.9);
+    }
+
+    .badge.traffic-green {
+      background: rgba(63, 185, 80, 0.9);
+    }
+
+    .badge.traffic-none {
+      background: rgba(48, 54, 61, 0.85);
+    }
+
+    #metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 0.75rem;
+      margin-top: 1.25rem;
+      width: 100%;
+      max-width: 480px;
+    }
+
+    .metric {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 0.75rem;
+      text-align: center;
+    }
+
+    .metric .label {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #8b949e;
+    }
+
+    .metric .value {
+      font-size: 1.6rem;
+      font-weight: 800;
+      margin-top: 0.25rem;
+    }
+
+    #score-val {
+      color: #58a6ff;
+    }
+
+    #drift-val {
+      color: #d2a8ff;
+    }
+
+    #status-val {
+      font-size: 1rem;
+      color: #3fb950;
+    }
+
+    #connection-badge {
+      margin-bottom: 1rem;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: #161b22;
+      border: 1px solid #30363d;
+    }
+
+    #connection-badge.connected {
+      border-color: #3fb950;
+      color: #3fb950;
+    }
+
+    #connection-badge.disconnected {
+      border-color: #f85149;
+      color: #f85149;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>⬡ ADLTS Live Dashboard</h1>
+  <div id="connection-badge" class="disconnected">● Disconnected</div>
+
+  <div id="video-container">
+    <img id="video-feed" alt="Waiting for stream..." />
+    <div id="overlay">
+      <span class="badge score" id="badge-score">— / 100</span>
+      <span class="badge maneuver" id="badge-maneuver">No maneuver</span>
+      <span class="badge traffic-none" id="badge-traffic">● NONE</span>
+    </div>
+  </div>
+
+  <div id="metrics">
+    <div class="metric">
+      <div class="label">Frame Score</div>
+      <div class="value" id="score-val">—</div>
+    </div>
+    <div class="metric">
+      <div class="label">Drift (cm)</div>
+      <div class="value" id="drift-val">—</div>
+    </div>
+    <div class="metric">
+      <div class="label">Status</div>
+      <div class="value" id="status-val">—</div>
+    </div>
+  </div>
+
+  <!-- Socket.IO from CDN -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script>
+    const socket = io("http://localhost:8000", {
+      path: "/socket.io",
+      transports: ["websocket"]
+    });
+
+    const badge = document.getElementById("connection-badge");
+    const feedImg = document.getElementById("video-feed");
+    const badgeScore = document.getElementById("badge-score");
+    const badgeMnvr = document.getElementById("badge-maneuver");
+    const badgeTraf = document.getElementById("badge-traffic");
+    const scoreVal = document.getElementById("score-val");
+    const driftVal = document.getElementById("drift-val");
+    const statusVal = document.getElementById("status-val");
+
+    socket.on("connect", () => {
+      badge.textContent = "● Connected";
+      badge.className = "connected";
+    });
+    socket.on("disconnect", () => {
+      badge.textContent = "● Disconnected";
+      badge.className = "disconnected";
+    });
+
+    socket.on("telemetry", (data) => {
+      // Video feed
+      if (data.frame_b64) feedImg.src = data.frame_b64;
+
+      // Score badges
+      const score = data.score !== null && data.score !== undefined ? data.score.toFixed(1) : "—";
+      badgeScore.textContent = `${score} / 100`;
+      scoreVal.textContent = score;
+      driftVal.textContent = data.error_cm !== null && data.error_cm !== undefined ? data.error_cm.toFixed(1) : "—";
+
+      // Maneuver
+      badgeMnvr.textContent = data.maneuver ? data.maneuver.replace(/_/g, " ") : "No maneuver";
+
+      // Traffic light
+      const tl = (data.traffic_light || "none").toUpperCase();
+      badgeTraf.textContent = `● ${tl}`;
+      badgeTraf.className = `badge traffic-${(data.traffic_light || "none").toLowerCase()}`;
+
+      // Motion status
+      statusVal.textContent = data.is_moving ? "Moving" : "Stopped";
+      statusVal.style.color = data.is_moving ? "#3fb950" : "#f85149";
+    });
+  </script>
+</body>
+
+</html>
