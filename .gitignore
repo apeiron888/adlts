@@ -4,3 +4,4 @@ __pycache__
 debug_frames
 yolov8n.pt
 ./models/yolov8n.pt
+test_results

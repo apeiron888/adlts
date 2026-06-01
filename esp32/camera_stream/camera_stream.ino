@@ -32,8 +32,8 @@
 // Create secrets.h alongside this file and define:
 //   #define WIFI_SSID     "your-ssid"
 //   #define WIFI_PASSWORD "your-password"
-#define WIFI_SSID     "SSID"
-#define WIFI_PASSWORD "PASSWORD"
+#define WIFI_SSID     "Tsegaye"
+#define WIFI_PASSWORD "11223344"
 
 // ── Camera pin map (AI-Thinker) ───────────────────────────────────────────────
 #define PWDN_GPIO_NUM   32
@@ -57,6 +57,7 @@
 // ── Streaming config ──────────────────────────────────────────────────────────
 #define STREAM_PORT   80
 #define TARGET_FPS    30
+#define FLASH_ALWAYS_ON  true  // Set to true to keep flash LED on during streaming
 
 // ── MJPEG boundary constants — lengths precomputed to avoid per-frame strlen ──
 static const char STREAM_CONTENT_TYPE[] =
@@ -178,6 +179,11 @@ static esp_err_t handleStream(httpd_req_t* req) {
             if (++writeCount % 30 == 0) videoFile.flush();
         }
 
+        // Keep flash LED on during streaming (if enabled)
+        if (FLASH_ALWAYS_ON) {
+            digitalWrite(FLASH_LED_GPIO, HIGH);
+        }
+
         // Boundary
         res = httpd_resp_send_chunk(req, STREAM_SEPARATOR, SEPARATOR_LEN);
         if (res != ESP_OK) { esp_camera_fb_return(fb); break; }
@@ -221,7 +227,7 @@ static esp_err_t handleStatus(httpd_req_t* req) {
 static void startWebServer() {
     httpd_config_t cfg  = HTTPD_DEFAULT_CONFIG();
     cfg.server_port     = STREAM_PORT;
-    cfg.max_uri_handlers = 4;
+    cfg.max_uri_handlers = 2;
 
     if (httpd_start(&server, &cfg) != ESP_OK) {
         Serial.printf("[HTTP] Failed to start server\n");
@@ -285,6 +291,11 @@ void setup() {
                   WiFi.localIP().toString().c_str());
     Serial.printf("[STREAM] http://%s/stream\n",
                   WiFi.localIP().toString().c_str());
+    if (FLASH_ALWAYS_ON) {
+        Serial.printf("[FLASH] Flash LED will be ON during streaming\n");
+    } else {
+        Serial.printf("[FLASH] Flash LED disabled\n");
+    }
 
     startWebServer();
 
